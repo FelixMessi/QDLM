@@ -1,5 +1,6 @@
 task: humaneval
 dataset_path: openai/openai_humaneval
+dataset_name: openai_humaneval
 unsafe_code: true
 output_type: generate_until
 test_split: test

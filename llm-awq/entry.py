@@ -51,7 +51,7 @@ parser.add_argument(
 parser.add_argument(
     "--tasks",
     type=str,
-    default="winogrande",
+    default="humaneval_instruct",
     help="The tasks to evaluate on, separated by commas.",
 )
 parser.add_argument(
@@ -145,7 +145,7 @@ parser.add_argument(
 parser.add_argument(
     "--max_new_tokens",
     type=int,
-    default=128,
+    default=768,
     help="The number of tokens to generate in each block. Default is 1024.",
 )
 parser.add_argument(
@@ -153,6 +153,66 @@ parser.add_argument(
     type=int,
     default=512,
     help="The number of tokens to generate in each block. Default is 1024.",
+)
+parser.add_argument(
+    "--temperature",
+    type=float,
+    default=0.0,
+    help="Sampling temperature for Dream diffusion generation.",
+)
+parser.add_argument(
+    "--top_p",
+    type=float,
+    default=0.95,
+    help="Nucleus sampling p for Dream diffusion generation.",
+)
+parser.add_argument(
+    "--top_k",
+    type=int,
+    default=None,
+    help="Top-k sampling for Dream diffusion generation (optional).",
+)
+parser.add_argument(
+    "--alg",
+    type=str,
+    default="entropy",
+    help="Remasking strategy for Dream diffusion generation.",
+)
+parser.add_argument(
+    "--alg_temp",
+    type=float,
+    default=0.0,
+    help="Temperature for the remasking strategy.",
+)
+parser.add_argument(
+    "--escape_until",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="If False, post-cut generations by task stop strings.",
+)
+parser.add_argument(
+    "--add_bos_token",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Whether to prepend BOS token before generation.",
+)
+parser.add_argument(
+    "--apply_chat_template",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Whether to apply chat template. Default: auto-enable for *_instruct tasks.",
+)
+parser.add_argument(
+    "--awq_n_samples",
+    type=int,
+    default=128,
+    help="Number of calibration samples used by AWQ search.",
+)
+parser.add_argument(
+    "--awq_seqlen",
+    type=int,
+    default=512,
+    help="Calibration sequence length used by AWQ search.",
 )
 args = parser.parse_args()
 assert (
@@ -269,8 +329,8 @@ def build_model_and_enc(model_path, dtype):
                 enc,
                 w_bit=args.w_bit,
                 q_config=q_config,
-                n_samples=128,
-                seqlen=512,
+                n_samples=args.awq_n_samples,
+                seqlen=args.awq_seqlen,
             )
             # import ipdb; ipdb.set_trace()
             if args.dump_awq:
@@ -362,36 +422,52 @@ def main():
 
     from lm_eval.api.registry import get_model
     class_name = model.__class__.__name__.lower()
-    if 'llada' in class_name:
+    model_path_lc = args.model_path.lower()
+    if 'llada' in class_name or 'llada' in model_path_lc:
         model_cls = get_model('llada_dist')
         model_args = dict(
             steps=args.steps, gen_length=args.gen_length, block_length=args.block_length, temperature=0., cfg_scale=0., remasking='low_confidence', mc_num=args.mc_num, batch_size=args.batch_size
         )
         model = model_cls(model=model, model_path=args.model_path, **model_args)
-    elif 'dream' in class_name:
+    elif 'dream' in class_name or 'dream' in model_path_lc:
         model_cls = get_model('dream_base')
         model_args = dict(
-            diffusion_steps=args.diffusion_steps, max_new_tokens=args.max_new_tokens, mc_num=args.mc_num, batch_size=args.batch_size
+            diffusion_steps=args.diffusion_steps,
+            max_new_tokens=args.max_new_tokens,
+            mc_num=args.mc_num,
+            batch_size=args.batch_size,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            alg=args.alg,
+            alg_temp=args.alg_temp,
+            escape_until=args.escape_until,
+            add_bos_token=args.add_bos_token,
         )
         model = model_cls(model=model, pretrained=args.model_path, **model_args)
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"Unsupported model class for lm_eval wrapper: {model.__class__.__name__}")
 
     
 
     from lm_eval import evaluator
 
     results = {}
-    task_names = args.tasks.split(",")
-    with torch.cuda.amp.autocast():
-        t_results = evaluator.simple_evaluate(
-            model,
-            tasks=task_names,
-            num_fewshot=args.num_fewshot,
-            limit=None if args.limit == -1 else args.limit,
-            model_args=model_args,
-            confirm_run_unsafe_code=True
-        )
+    task_names = [task.strip() for task in args.tasks.split(",") if task.strip()]
+    if args.apply_chat_template is None:
+        apply_chat_template = any("instruct" in task for task in task_names)
+    else:
+        apply_chat_template = args.apply_chat_template
+
+    t_results = evaluator.simple_evaluate(
+        model,
+        tasks=task_names,
+        num_fewshot=args.num_fewshot,
+        limit=None if args.limit == -1 else args.limit,
+        model_args=model_args,
+        apply_chat_template=apply_chat_template,
+        confirm_run_unsafe_code=True,
+    )
     results.update(t_results)
     print(args)
     print(results['results'])

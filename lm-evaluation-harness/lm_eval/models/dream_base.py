@@ -211,6 +211,20 @@ class DreamBase(LM):
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
             pretrained, trust_remote_code=trust_remote_code
         )
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+        self._align_dtype_hooks = []
+        if hasattr(self.model, "lm_head") and isinstance(self.model.lm_head, torch.nn.Linear):
+            def _align_lm_head_input_dtype(module, inputs):
+                hidden_states = inputs[0]
+                target_dtype = module.weight.dtype
+                if hidden_states.dtype != target_dtype:
+                    hidden_states = hidden_states.to(target_dtype)
+                return (hidden_states, *inputs[1:])
+            self._align_dtype_hooks.append(
+                self.model.lm_head.register_forward_pre_hook(_align_lm_head_input_dtype)
+            )
 
     def tok_decode(self, tokens, skip_special_tokens=True):
         return self.tokenizer.decode(tokens, skip_special_tokens=skip_special_tokens)
@@ -257,15 +271,24 @@ class DreamBase(LM):
     def tokenizer_name(self) -> str:
         return self.tokenizer.name_or_path.replace("/", "__")
 
-    def _generate_batch(self, prompts: List[str]) -> List[str]:
+    def _generate_batch(
+        self,
+        prompts: List[str],
+        max_new_tokens: Optional[int] = None,
+    ) -> List[str]:
+        if max_new_tokens is None:
+            max_new_tokens = self.max_new_tokens
         # diff
         if self.add_bos_token:
             prompts = [self.tokenizer.bos_token + p for p in prompts]
         # tokenize
-        prompt_ids = self.tokenizer(prompts, return_tensors="pt", padding=True, padding_side="left").input_ids
-        if len(prompt_ids) > self.max_length-self.max_new_tokens:
-            eval_logger.warning(f"Prompt length {len(prompt_ids)} is larger than {self.max_length-self.max_new_tokens}, cutoff on the left side")
-            prompt_ids = prompt_ids[-(self.max_length-self.max_new_tokens):]
+        prompt_ids = self.tokenizer(prompts, return_tensors="pt", padding=True).input_ids
+        max_prompt_length = max(self.max_length - max_new_tokens, 1)
+        if prompt_ids.shape[1] > max_prompt_length:
+            eval_logger.warning(
+                f"Prompt length {prompt_ids.shape[1]} is larger than {max_prompt_length}, cutoff on the left side"
+            )
+            prompt_ids = prompt_ids[:, -max_prompt_length:]
 
         attn_mask = prompt_ids.ne(self.tokenizer.pad_token_id)
         prompt_ids = prompt_ids.to(device=self.device)
@@ -274,7 +297,7 @@ class DreamBase(LM):
         generation_ids = self.model.diffusion_generate(
             prompt_ids,
             attention_mask=attn_mask,
-            max_new_tokens=self.max_new_tokens,
+            max_new_tokens=max_new_tokens,
             output_history=False,
             return_dict_in_generate=True,
             steps=self.diffusion_steps,
@@ -305,10 +328,18 @@ class DreamBase(LM):
         for batch_idx in range(0, len(requests), self.batch_size):
             batch_requests = requests[batch_idx : batch_idx + self.batch_size]
             contexts, gen_args = zip(*[req.arguments for req in batch_requests])
-            responses = self._generate_batch(contexts)
+            batch_gen_args = gen_args[0] if len(gen_args) else {}
+            # Keep generation length controlled by model_args.max_new_tokens.
+            # lm-eval task defaults (e.g., humaneval=1024) should not silently override it.
+            max_gen_toks = min(batch_gen_args.get("max_gen_toks", self.max_new_tokens), self.max_new_tokens)
+            responses = self._generate_batch(
+                contexts,
+                max_new_tokens=max_gen_toks,
+            )
+
             if not self.escape_until:
                 for i, r in enumerate(responses):
-                    for s in gen_args[0]['until']:
+                    for s in gen_args[0]["until"]:
                         r = r.split(s)[0]
                     responses[i] = r
 

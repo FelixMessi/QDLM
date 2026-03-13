@@ -4,7 +4,7 @@ from datasets import load_dataset
 
 def get_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_size=512):
     if data == "pileval":
-        dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+        dataset = load_dataset("json", data_files="/mnt/bingchen/code/QDLM/val.jsonl.zst", split="train")
     else:
         raise NotImplementedError
     dataset = dataset.shuffle(seed=42)

@@ -22,6 +22,7 @@ from . import (
     vllm_vlms,
     llada,
     dream_base,
+    diffllm,
 )
 
 
